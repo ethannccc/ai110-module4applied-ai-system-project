@@ -41,7 +41,10 @@ class DocuBot:
                 with open(path, "r", encoding="utf8") as f:
                     text = f.read()
                 filename = os.path.basename(path)
-                docs.append((filename, text))
+                for chunk in text.split("\n\n"):
+                    chunk = chunk.strip()
+                    if chunk:
+                        docs.append((filename, chunk))
         return docs
 
     # -----------------------------------------------------------
@@ -49,22 +52,15 @@ class DocuBot:
     # -----------------------------------------------------------
 
     def build_index(self, documents):
-        """
-        TODO (Phase 1):
-        Build a tiny inverted index mapping lowercase words to the documents
-        they appear in.
-
-        Example structure:
-        {
-            "token": ["AUTH.md", "API_REFERENCE.md"],
-            "database": ["DATABASE.md"]
-        }
-
-        Keep this simple: split on whitespace, lowercase tokens,
-        ignore punctuation if needed.
-        """
         index = {}
-        # TODO: implement simple indexing
+
+        for filename, text in documents:
+            for token in text.lower().split():
+                token = token.strip(".,!?;:\"'()[]{}")
+                if token:
+                    index.setdefault(token, [])
+                    if filename not in index[token]:
+                        index[token].append(filename)
         return index
 
     # -----------------------------------------------------------
@@ -72,28 +68,23 @@ class DocuBot:
     # -----------------------------------------------------------
 
     def score_document(self, query, text):
-        """
-        TODO (Phase 1):
-        Return a simple relevance score for how well the text matches the query.
+        text_lower = text.lower()
+        return sum(1 for word in query.lower().split() if word in text_lower)
 
-        Suggested baseline:
-        - Convert query into lowercase words
-        - Count how many appear in the text
-        - Return the count as the score
+    def retrieve(self, query, top_k=3, min_score=2):
         """
-        # TODO: implement scoring
-        return 0
-
-    def retrieve(self, query, top_k=3):
-        """
-        TODO (Phase 1):
         Use the index and scoring function to select top_k relevant document snippets.
 
         Return a list of (filename, text) sorted by score descending.
+        Only includes results that meet min_score to avoid returning weakly
+        matched chunks when the docs don't cover the question.
         """
-        results = []
-        # TODO: implement retrieval logic
-        return results[:top_k]
+        scored = [
+            (self.score_document(query, text), filename, text)
+            for filename, text in self.documents
+        ]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [(filename, text) for score, filename, text in scored if score >= min_score][:top_k]
 
     # -----------------------------------------------------------
     # Answering Modes
