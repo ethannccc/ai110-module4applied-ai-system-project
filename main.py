@@ -33,7 +33,7 @@ def try_create_llm_client():
 def choose_mode(has_llm):
     """
     Asks the user which mode to run.
-    Returns "1", "2", "3", or "q".
+    Returns "1", "2", "3", "4", or "q".
     """
     print("Choose a mode:")
     if has_llm:
@@ -43,8 +43,10 @@ def choose_mode(has_llm):
     print("  2) Retrieval only (no LLM)")
     if has_llm:
         print("  3) RAG (retrieval + LLM)")
+        print("  4) Agentic RAG (plan → retrieve → self-check → refine)")
     else:
         print("  3) RAG (unavailable, no GEMINI_API_KEY)")
+        print("  4) Agentic RAG (unavailable, no GEMINI_API_KEY)")
     print("  q) Quit")
 
     choice = input("Enter choice: ").strip().lower()
@@ -129,6 +131,34 @@ def run_rag_mode(bot, has_llm):
         print()
 
 
+def run_agentic_mode(bot, has_llm):
+    """
+    Mode 4: Agentic RAG.
+
+    The bot plans its own retrieval, checks whether the results are sufficient,
+    and loops with refined search terms until it has enough context or reaches
+    the iteration limit. More LLM calls than Mode 3, but handles multi-part
+    and ambiguous questions better.
+    """
+    if not has_llm or bot.llm_client is None:
+        print("\nAgentic mode is not available (no GEMINI_API_KEY).\n")
+        return
+
+    queries, label = get_query_or_use_samples()
+    print(f"\nRunning agentic RAG mode on {label}...\n")
+
+    for query in queries:
+        print("=" * 60)
+        print(f"Question: {query}\n")
+        try:
+            answer = bot.answer_agentic(query)
+        except RuntimeError as exc:
+            answer = f"[Error] {exc}"
+        print("Answer:")
+        print(answer)
+        print()
+
+
 def main():
     print("DocuBot Tinker Activity")
     print("=======================\n")
@@ -148,8 +178,10 @@ def main():
             run_retrieval_only_mode(bot)
         elif choice == "3":
             run_rag_mode(bot, has_llm)
+        elif choice == "4":
+            run_agentic_mode(bot, has_llm)
         else:
-            print("\nUnknown choice. Please pick 1, 2, 3, or q.\n")
+            print("\nUnknown choice. Please pick 1, 2, 3, 4, or q.\n")
 
 
 if __name__ == "__main__":

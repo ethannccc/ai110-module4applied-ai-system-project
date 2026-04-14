@@ -124,6 +124,60 @@ class DocuBot:
 
         return self.llm_client.answer_from_snippets(query, snippets)
 
+    def answer_agentic(self, query, max_iterations=3):
+        """
+        Phase 3 agentic RAG mode.
+
+        The bot actively plans and checks its own work across up to
+        max_iterations retrieval passes:
+
+        1. Analyze  — ask the LLM to extract focused search terms from the query.
+        2. Retrieve — fetch snippets using those terms.
+        3. Check    — ask the LLM if the snippets are sufficient to answer.
+                      If yes, break out of the loop.
+        4. Reformulate — if not sufficient, ask the LLM for better search terms
+                         targeting the identified gap, then loop back to step 2.
+        5. Generate — synthesize a final answer from all accumulated snippets.
+        """
+        if self.llm_client is None:
+            raise RuntimeError(
+                "Agentic mode requires an LLM client. Provide a GeminiClient instance."
+            )
+
+        # Step 1: Turn the user question into retrieval-friendly search terms.
+        search_query = self.llm_client.analyze_query(query)
+
+        all_snippets = []
+        seen_keys = set()  # deduplicates by (filename, first-50-chars-of-text)
+
+        for iteration in range(max_iterations):
+            # Step 2: Retrieve snippets with the current search terms.
+            new_snippets = self.retrieve(search_query)
+
+            for fname, text in new_snippets:
+                key = (fname, text[:50])
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    all_snippets.append((fname, text))
+
+            if not all_snippets:
+                return "I do not know based on these docs."
+
+            # Step 3: Ask the LLM whether the accumulated snippets are enough.
+            is_sufficient, reason = self.llm_client.check_sufficiency(query, all_snippets)
+
+            if is_sufficient:
+                break
+
+            # Step 4: Reformulate for the next pass, unless this was the last one.
+            if iteration < max_iterations - 1:
+                search_query = self.llm_client.reformulate_query(
+                    query, all_snippets, reason
+                )
+
+        # Step 5: Generate the final answer from everything retrieved.
+        return self.llm_client.answer_from_snippets(query, all_snippets)
+
     # -----------------------------------------------------------
     # Bonus Helper: concatenated docs for naive generation mode
     # -----------------------------------------------------------

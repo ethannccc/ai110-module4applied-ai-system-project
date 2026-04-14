@@ -46,14 +46,24 @@ class GeminiClient:
     # Phase 0: naive generation over full docs
     # -----------------------------------------------------------
 
+    def _generate(self, prompt):
+        """
+        Internal helper that wraps generate_content with error handling.
+        Returns the response text, or raises RuntimeError on API failure.
+        """
+        try:
+            response = self.model.generate_content(prompt)
+            return (response.text or "").strip()
+        except Exception as exc:
+            raise RuntimeError(f"Gemini API call failed: {exc}") from exc
+
     def naive_answer_over_full_docs(self, query, all_text):
         # We ignore all_text and send a generic prompt instead
         prompt = f"""
     You are a documentation assistant. 
     Answer this developer question: {query}
     """
-        response = self.model.generate_content(prompt)
-        return (response.text or "").strip()
+        return self._generate(prompt)
 
     # -----------------------------------------------------------
     # Phase 2: RAG style generation over retrieved snippets
@@ -107,5 +117,66 @@ Rules:
 - When you do answer, briefly mention which files you relied on.
 """
 
-        response = self.model.generate_content(prompt)
-        return (response.text or "").strip()
+        return self._generate(prompt)
+
+    # -----------------------------------------------------------
+    # Phase 3 (Agentic): query planning, sufficiency checking, reformulation
+    # -----------------------------------------------------------
+
+    def analyze_query(self, query):
+        """
+        Agentic step 1: decompose the user question into focused search terms.
+        Returns a refined search string the retriever can use.
+        """
+        prompt = f"""You are a search query analyzer for a documentation assistant.
+
+Given a developer question, extract 2-4 specific technical keywords or short phrases
+that would best retrieve relevant documentation snippets.
+
+Return ONLY a comma-separated list of search terms. No explanation, no punctuation besides commas.
+
+Question: {query}
+
+Search terms:"""
+        return self._generate(prompt)
+
+    def check_sufficiency(self, query, snippets):
+        """
+        Agentic step 3: decide whether the retrieved snippets contain enough
+        information to answer the question.
+
+        Returns (is_sufficient: bool, reason: str).
+        """
+        context = "\n\n".join(f"[{fname}]\n{text}" for fname, text in snippets)
+        prompt = f"""You are evaluating whether documentation snippets contain enough
+information to fully answer a developer question.
+
+Question: {query}
+
+Snippets:
+{context}
+
+Reply with exactly one of these two formats:
+SUFFICIENT: <one sentence explaining what the snippets cover>
+INSUFFICIENT: <one sentence describing what specific information is missing>"""
+        text = self._generate(prompt)
+        is_sufficient = text.upper().startswith("SUFFICIENT")
+        return is_sufficient, text
+
+    def reformulate_query(self, original_query, snippets, gap_description):
+        """
+        Agentic step 4: generate new search terms targeting the identified gap.
+        Returns a new search string for the next retrieval iteration.
+        """
+        already_checked = ", ".join(fname for fname, _ in snippets)
+        prompt = f"""You are helping a documentation assistant find missing information.
+
+Original question: {original_query}
+Already retrieved from files: {already_checked}
+Gap: {gap_description}
+
+Generate 2-3 alternative technical search terms to find the missing information.
+Return ONLY a comma-separated list of terms. No explanation.
+
+Search terms:"""
+        return self._generate(prompt)
