@@ -5,10 +5,14 @@ Core DocuBot class responsible for:
 - Retrieving relevant snippets (Phase 1)
 - Supporting retrieval only answers
 - Supporting RAG answers when paired with Gemini (Phase 2)
+- Supporting agentic RAG when paired with Gemini (Phase 3)
 """
 
 import os
 import glob
+
+NOT_FOUND = "I do not know based on these docs."
+
 
 class DocuBot:
     def __init__(self, docs_folder="docs", llm_client=None):
@@ -18,11 +22,7 @@ class DocuBot:
         """
         self.docs_folder = docs_folder
         self.llm_client = llm_client
-
-        # Load documents into memory
-        self.documents = self.load_documents()  # List of (filename, text)
-
-        # Build a retrieval index (implemented in Phase 1)
+        self.documents = self.load_documents()  # list of (filename, text) chunks
         self.index = self.build_index(self.documents)
 
     # -----------------------------------------------------------
@@ -32,12 +32,12 @@ class DocuBot:
     def load_documents(self):
         """
         Loads all .md and .txt files inside docs_folder.
-        Returns a list of tuples: (filename, text)
+        Returns a list of (filename, chunk_text) tuples.
         """
         docs = []
         pattern = os.path.join(self.docs_folder, "*.*")
         for path in glob.glob(pattern):
-            if path.endswith(".md") or path.endswith(".txt"):
+            if path.endswith((".md", ".txt")):
                 with open(path, "r", encoding="utf8") as f:
                     text = f.read()
                 filename = os.path.basename(path)
@@ -53,7 +53,6 @@ class DocuBot:
 
     def build_index(self, documents):
         index = {}
-
         for filename, text in documents:
             for token in text.lower().split():
                 token = token.strip(".,!?;:\"'()[]{}")
@@ -73,118 +72,83 @@ class DocuBot:
 
     def retrieve(self, query, top_k=3, min_score=2):
         """
-        Use the index and scoring function to select top_k relevant document snippets.
-
-        Return a list of (filename, text) sorted by score descending.
-        Only includes results that meet min_score to avoid returning weakly
-        matched chunks when the docs don't cover the question.
+        Score every chunk against the query and return the top_k results
+        that meet min_score. Sorted by score descending.
         """
         scored = [
             (self.score_document(query, text), filename, text)
             for filename, text in self.documents
         ]
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [(filename, text) for score, filename, text in scored if score >= min_score][:top_k]
+        return [(f, t) for score, f, t in scored if score >= min_score][:top_k]
+
+    # -----------------------------------------------------------
+    # Private helpers
+    # -----------------------------------------------------------
+
+    def _require_llm(self, mode_name):
+        """Raise a clear error when a mode is called without an LLM client."""
+        if self.llm_client is None:
+            raise RuntimeError(
+                f"{mode_name} requires an LLM client. Provide a GeminiClient instance."
+            )
+
+    def _merge_snippets(self, existing, new):
+        """Return existing plus any snippets from new not already present."""
+        seen = {(f, t[:50]) for f, t in existing}
+        return existing + [(f, t) for f, t in new if (f, t[:50]) not in seen]
 
     # -----------------------------------------------------------
     # Answering Modes
     # -----------------------------------------------------------
 
     def answer_retrieval_only(self, query, top_k=3):
-        """
-        Phase 1 retrieval only mode.
-        Returns raw snippets and filenames with no LLM involved.
-        """
+        """Phase 1: return raw snippets with no LLM involved."""
         snippets = self.retrieve(query, top_k=top_k)
-
         if not snippets:
-            return "I do not know based on these docs."
-
-        formatted = []
-        for filename, text in snippets:
-            formatted.append(f"[{filename}]\n{text}\n")
-
-        return "\n---\n".join(formatted)
+            return NOT_FOUND
+        return "\n---\n".join(f"[{filename}]\n{text}\n" for filename, text in snippets)
 
     def answer_rag(self, query, top_k=3):
-        """
-        Phase 2 RAG mode.
-        Uses student retrieval to select snippets, then asks Gemini
-        to generate an answer using only those snippets.
-        """
-        if self.llm_client is None:
-            raise RuntimeError(
-                "RAG mode requires an LLM client. Provide a GeminiClient instance."
-            )
-
+        """Phase 2: retrieve snippets then ask Gemini to synthesize an answer."""
+        self._require_llm("RAG mode")
         snippets = self.retrieve(query, top_k=top_k)
-
-        if not snippets:
-            return "I do not know based on these docs."
-
-        return self.llm_client.answer_from_snippets(query, snippets)
+        return self.llm_client.answer_from_snippets(query, snippets) if snippets else NOT_FOUND
 
     def answer_agentic(self, query, max_iterations=3):
         """
-        Phase 3 agentic RAG mode.
+        Phase 3: agentic RAG — the bot plans and checks its own retrieval.
 
-        The bot actively plans and checks its own work across up to
-        max_iterations retrieval passes:
-
-        1. Analyze  — ask the LLM to extract focused search terms from the query.
-        2. Retrieve — fetch snippets using those terms.
-        3. Check    — ask the LLM if the snippets are sufficient to answer.
-                      If yes, break out of the loop.
-        4. Reformulate — if not sufficient, ask the LLM for better search terms
-                         targeting the identified gap, then loop back to step 2.
-        5. Generate — synthesize a final answer from all accumulated snippets.
+        1. Analyze     — LLM extracts focused search terms from the query.
+        2. Retrieve    — fetch snippets using those terms.
+        3. Check       — LLM decides if snippets are sufficient to answer.
+                         If yes, break out of the loop.
+        4. Reformulate — LLM generates better terms targeting the gap, then loop.
+        5. Generate    — synthesize a final answer from all accumulated snippets.
         """
-        if self.llm_client is None:
-            raise RuntimeError(
-                "Agentic mode requires an LLM client. Provide a GeminiClient instance."
-            )
+        self._require_llm("Agentic mode")
 
-        # Step 1: Turn the user question into retrieval-friendly search terms.
         search_query = self.llm_client.analyze_query(query)
-
         all_snippets = []
-        seen_keys = set()  # deduplicates by (filename, first-50-chars-of-text)
 
         for iteration in range(max_iterations):
-            # Step 2: Retrieve snippets with the current search terms.
-            new_snippets = self.retrieve(search_query)
-
-            for fname, text in new_snippets:
-                key = (fname, text[:50])
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    all_snippets.append((fname, text))
+            all_snippets = self._merge_snippets(all_snippets, self.retrieve(search_query))
 
             if not all_snippets:
-                return "I do not know based on these docs."
+                return NOT_FOUND
 
-            # Step 3: Ask the LLM whether the accumulated snippets are enough.
             is_sufficient, reason = self.llm_client.check_sufficiency(query, all_snippets)
-
             if is_sufficient:
                 break
 
-            # Step 4: Reformulate for the next pass, unless this was the last one.
             if iteration < max_iterations - 1:
-                search_query = self.llm_client.reformulate_query(
-                    query, all_snippets, reason
-                )
+                search_query = self.llm_client.reformulate_query(query, all_snippets, reason)
 
-        # Step 5: Generate the final answer from everything retrieved.
         return self.llm_client.answer_from_snippets(query, all_snippets)
 
     # -----------------------------------------------------------
-    # Bonus Helper: concatenated docs for naive generation mode
+    # Helper: concatenated docs for naive generation mode
     # -----------------------------------------------------------
 
     def full_corpus_text(self):
-        """
-        Returns all documents concatenated into a single string.
-        This is used in Phase 0 for naive 'generation only' baselines.
-        """
         return "\n\n".join(text for _, text in self.documents)
